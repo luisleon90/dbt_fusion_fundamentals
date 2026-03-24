@@ -300,6 +300,190 @@ FROM customers c
 
 ---
 
+---
+ 
+## Step 4a: Practice Task — Debug `fct_orders` with dbt Fusion
+ 
+Your team needs a reliable **orders fact table** for downstream analytics. A colleague started the `fct_orders` model, but it has bugs: some will stop the query from compiling, and others will produce silently wrong results even after it runs.
+ 
+Your job is to use **dbt Fusion** to find and fix every issue. There are **5 bugs** in total — a mix of compile errors, incorrect column references, and logic problems. Fusion will help you catch most of them without running a single query against the warehouse.
+ 
+> **Tip:** Work through the sub-steps in order. Each one targets a different type of bug and a different Fusion feature. Don't skip ahead to the solution — the goal is to build the debugging instinct, not just fix the file.
+ 
+---
+ 
+### 4a.1 Open the Starter File
+ 
+1. In the **File Explorer**, expand the `fusion_vhol_practice_tasks` folder, then open the `task_1` subfolder
+2. Click on **`task_1_fct_orders_buggy.sql`** to open it in the editor
+3. Read through the entire file before touching anything — notice it is built from five CTEs:
+   - `orders` — pulls from a staging orders model
+   - `stores` — pulls store location and tax context
+   - `order_items` — pulls individual line items per order
+   - `item_rollup` — aggregates items up to order grain
+   - `joined` — joins everything together and calculates `expected_tax` and `tax_delta`
+4. In the **File Explorer**, right-click the file and select **Move** (or drag it) into the `models/marts/` directory
+5. Confirm the file now appears under `models/marts/` in the explorer
+ 
+---
+ 
+### 4a.2 Find and Fix the Compile Errors
+ 
+Fusion reads your SQL in real time. As soon as the file is in your project, it will flag any references it cannot resolve — no need to run anything.
+ 
+1. Look at the editor — you should see **red underlines or error indicators** on one or more lines
+2. **Hover** over each underlined section to read the error message in the tooltip
+3. Pay close attention to the `orders` CTE and the `stores` CTE — both contain errors Fusion will surface immediately
+ 
+> **What to look for:** Fusion flags unresolved `ref()` calls (model names that don't exist) and column names that don't exist on the referenced model.
+ 
+<details>
+<summary>💡 Hint — Bug 1: orders CTE</summary>
+ 
+Check the model name inside `ref()` in the `orders` CTE. Compare it carefully to the actual staging model name — it's a one-character difference.
+ 
+```sql
+-- Buggy
+from {{ ref('stg_jaffle_shop__order') }}
+ 
+-- Fixed
+from {{ ref('stg_jaffle_shop__orders') }}
+```
+ 
+</details>
+ 
+<details>
+<summary>💡 Hint — Bug 2: stores CTE</summary>
+ 
+Hover over the column name in the `stores` CTE SELECT list. Fusion will show the available column names on `stg_jaffle_shop__stores` — compare them to what's written.
+ 
+```sql
+-- Buggy
+taxrate
+ 
+-- Fixed
+tax_rate
+```
+ 
+</details>
+ 
+4. Fix both errors, then confirm the red underlines disappear from the editor
+ 
+---
+ 
+### 4a.3 Preview the `item_rollup` CTE to Check Grain
+ 
+The model compiles now — but that doesn't mean the logic is correct. The `item_rollup` CTE is supposed to produce **exactly one row per `order_id`**. Use Fusion's CTE preview to verify this before running anything.
+ 
+1. In the editor, locate the `item_rollup` CTE
+2. **Highlight** the word `item_rollup` where it appears in the `FROM` clause of the `joined` CTE (or anywhere it is named)
+3. Right-click and select **Preview** to open the CTE output in the results panel
+4. Look at the result set:
+   - How many rows are there?
+   - Are there multiple rows for the same `order_id`?
+   - Compare the values in `items_count` vs `distinct_products_count` — do they make sense?
+ 
+> **What you're checking:** If `item_rollup` has more than one row per `order_id`, joining it to `orders` will fan out and duplicate rows in the final model. This must be fixed before going further.
+ 
+You should find **two logic bugs** in the `item_rollup` CTE. Look carefully at the `GROUP BY` clause and the aggregate functions.
+ 
+<details>
+<summary>💡 Hint — Bug 3: distinct product count</summary>
+ 
+`count(product_id)` counts every line item, including duplicates of the same product in an order. To count unique products, use `DISTINCT`:
+ 
+```sql
+-- Buggy
+count(product_id) as distinct_products_count
+ 
+-- Fixed
+count(distinct product_id) as distinct_products_count
+```
+ 
+</details>
+ 
+<details>
+<summary>💡 Hint — Bug 4: GROUP BY breaks order grain</summary>
+ 
+Adding `product_id` to the `GROUP BY` creates one row per product per order — not one row per order. The rollup must group only by `order_id`:
+ 
+```sql
+-- Buggy
+group by order_id, product_id
+ 
+-- Fixed
+group by order_id
+```
+ 
+</details>
+ 
+5. Apply both fixes, then **re-run the CTE preview** on `item_rollup`
+6. Confirm the output now shows exactly one row per `order_id` and that `items_count` ≥ `distinct_products_count` for every row
+ 
+---
+ 
+### 4a.4 Fix the Join Condition
+ 
+There is one more bug — this time in the `joined` CTE. It's a subtle one that may or may not surface as a red underline depending on your SQL dialect, but it will produce incorrect results.
+ 
+1. Locate the `joined` CTE and read the `LEFT JOIN item_rollup` condition carefully
+2. The `FROM` clause of `joined` is `from orders` — think about what table aliases are in scope
+3. Check whether the left side of the join condition references a CTE that is **not** in the `FROM` clause of `joined`
+ 
+<details>
+<summary>💡 Hint — Bug 5: wrong join key alias</summary>
+ 
+The join condition references `order_items.order_id`, but `order_items` is not in the `FROM` clause of `joined` — `orders` is. This either causes a compilation error or silently joins on the wrong reference:
+ 
+```sql
+-- Buggy
+left join item_rollup
+    on order_items.order_id = item_rollup.order_id
+ 
+-- Fixed
+left join item_rollup
+    on orders.order_id = item_rollup.order_id
+```
+ 
+</details>
+ 
+4. Fix the join condition
+ 
+---
+ 
+### 4a.5 Run the Model and Validate
+ 
+With all five bugs fixed, it's time to run the model and confirm it meets the acceptance criteria.
+ 
+1. With `task_1_fct_orders_buggy.sql` open in the editor, click the **Run** button dropdown
+2. Select **Run model** to build only this model in your development schema
+3. Confirm the run completes with an `OK` status in the **Results / Logs Panel**:
+ 
+```
+1 of 1 START sql table model dev.your_schema.task_1_fct_orders_buggy ....... [RUN]
+1 of 1 OK created sql table model dev.your_schema.task_1_fct_orders_buggy .. [OK in X.XXs]
+```
+ 
+4. Click **Preview** on the final `select * from joined` to inspect the output
+5. Work through the checklist below to confirm everything looks right:
+ 
+| Check | What to verify |
+|---|---|
+| ✅ One row per `order_id` | No duplicate `order_id` values in the output |
+| ✅ `tax_rate` is populated | No null values in the `tax_rate` column |
+| ✅ `items_count` ≥ `distinct_products_count` | Every row has at least as many items as distinct products |
+| ✅ `expected_tax` calculates correctly | Value equals `subtotal * tax_rate` — no type errors |
+| ✅ `tax_delta` looks reasonable | Small positive or negative values relative to `expected_tax` |
+| ✅ Sorted correctly | Results are ordered by `order_date desc, order_id` |
+ 
+---
+ 
+### ✅ Task 1 Complete
+ 
+Nice work! You used Fusion's real-time error detection, hover tooltips, and CTE previews to catch five different types of bugs — compile errors, a wrong column name, an incorrect aggregate, a grain-breaking `GROUP BY`, and a bad join reference — before running a single warehouse query.
+ 
+> **What's next:** Task 2 follows the same pattern but with fewer hints. You'll need to rely more on Fusion's feedback and your own grain awareness. Take what you learned here and apply it independently.
+
 ## Step 5: Reduce Costs with State-Aware Orchestration
 
 *Your instructor will walk through this section as a demo and explain the concept on slides. Follow along with the steps below.*
@@ -308,6 +492,202 @@ FROM customers c
   <strong>ℹ️ The problem this solves:</strong><br>
   Without Fusion, every scheduled dbt job rebuilds <em>every model</em> — even if the upstream data hasn't changed. On a project with hundreds of models, this wastes significant time and warehouse compute. State-aware orchestration fixes this automatically.
 </div>
+
+---
+ 
+## Step 4b: State-Aware Orchestration — Configure Model Freshness
+ 
+State-aware orchestration (SAO) is one of Fusion's most impactful capabilities. Instead of rebuilding every model on every run, dbt can now determine which models actually need to be rebuilt — based on whether upstream data has changed and whether enough time has passed since the last build.
+ 
+In this step, you'll configure freshness rules on three models and run the same production job twice, predicting what will happen before each run.
+ 
+> **Reference:** [dbt Freshness Configuration Docs](https://docs.getdbt.com/reference/resource-configs/freshness)
+ 
+---
+ 
+### 4b.1 Confirm SAO Is Enabled on the Production Job
+ 
+1. In the left-hand navigation, click **Orchestration → Jobs**
+2. Open **Prod Job**
+3. Click **Settings** in the top-right corner
+4. Under **Execution settings**, confirm the **Enable Fusion cost optimization features** checkbox is checked
+5. Click **Save**
+ 
+---
+ 
+### 4b.2 Configure the Job to Run on Your Branch
+ 
+By default, the production job runs against the main branch. For this activity, you'll point it at your personal development branch so your config changes are picked up.
+ 
+1. Navigate to **Orchestration → Jobs**
+2. Click into **Prod Job**, then click **Edit**
+3. Under **Environment settings**, check **Only run on a custom branch**
+4. In the text box that appears, type your branch name exactly as it appears in the Studio IDE
+5. Click **Save**
+ 
+---
+ 
+### 4b.3 Add `build_after` to `dim_customers`
+ 
+The `build_after` config tells SAO: *"even if upstream data has changed, don't rebuild this model unless at least X time has passed since its last build."*
+ 
+You will set `dim_customers` to only rebuild if it is at least **3 hours** old.
+ 
+1. In the **File Explorer**, navigate to `models/marts/` and open **`dim_customers.yml`**
+2. Find the `- name: dim_customers` entry
+3. Add the `config:` block directly under the model `description:` line, so it looks like this:
+ 
+```yaml
+- name: dim_customers
+  description: This model....
+  config:
+    freshness:
+      build_after:
+        count: 3
+        period: hour
+  columns:
+    - name: customer_id
+```
+ 
+4. Save the file with **Cmd+S** (Mac) or **Ctrl+S** (Windows)
+5. Commit your changes using the **Git Integration** button in the top-left corner
+ 
+> **What this means:** Even if a source upstream of `dim_customers` receives new data, SAO will skip the rebuild if the model was built less than 3 hours ago. This is useful for expensive models that don't need to refresh on every pipeline run.
+ 
+---
+ 
+### 4b.4 Add `build_after` to `stg_jaffle_shop__orders`
+ 
+You will set this staging model to only rebuild if at least **2 minutes** have passed since its last build.
+ 
+1. In the **File Explorer**, navigate to `models/staging/jaffle_shop/` and open **`stg_jaffle_shop.yml`**
+2. Find the `- name: stg_jaffle_shop__orders` entry
+3. Add the `config:` block directly under its `description:` line:
+ 
+```yaml
+- name: stg_jaffle_shop__orders
+  description: "{{ doc('stg_jaffle_shop__orders') }}"
+  config:
+    freshness:
+      build_after:
+        count: 2
+        period: minute
+  columns:
+    - name: order_id
+```
+ 
+4. Save the file — but **do not commit yet**, as you still have one more change to make in this file
+ 
+> **What this means:** This model will be skipped if it was built within the last 2 minutes, even if upstream data changed. For staging models that run frequently, this prevents unnecessary rebuilds within short windows.
+ 
+---
+ 
+### 4b.5 Add `updates_on: all` to `stg_jaffle_shop__stores`
+ 
+The `updates_on` config controls how many upstream sources need new data before a model qualifies for a rebuild. The default is `any` — meaning the model rebuilds if *at least one* upstream source has new data. Changing it to `all` means the model only rebuilds if *every* direct upstream source has new data.
+ 
+1. Still in **`stg_jaffle_shop.yml`**, find the `- name: stg_jaffle_shop__stores` entry
+2. Add the `config:` block under its `description:` line:
+ 
+```yaml
+- name: stg_jaffle_shop__stores
+  description: "{{ doc('stg_jaffle_shop__stores') }}"
+  config:
+    freshness:
+      updates_on: all
+  columns:
+    - name: store_id
+```
+ 
+3. Save the file
+4. Commit all your changes using the **Git Integration** button
+ 
+---
+ 
+### 4b.6 Prediction Exercise — Run #1
+ 
+Before triggering the job, pause and think through what SAO will do. For each of the three models you just configured, write down your prediction:
+ 
+| Model | Will it build or be reused? | Why? |
+|---|---|---|
+| `dim_customers` | | |
+| `stg_jaffle_shop__orders` | | |
+| `stg_jaffle_shop__stores` | | |
+ 
+Consider:
+- Has enough time passed since the last build to satisfy the `build_after` threshold?
+- Did upstream source data change since the last run?
+- Does the model require **any** or **all** upstream sources to have new data?
+ 
+<details>
+<summary>🔍 Expected outcome for Run #1</summary>
+ 
+**`dim_customers` → Reused**
+The `build_after: 3 hours` threshold has not been met — the model was built too recently. SAO skips the rebuild regardless of whether upstream data changed.
+ 
+**`stg_jaffle_shop__orders` → Rebuilt**
+Upstream changes were detected and the `build_after: 2 minutes` threshold was satisfied. The model qualifies for a rebuild.
+ 
+**`stg_jaffle_shop__stores` → Rebuilt**
+Upstream changes were detected and all direct upstream sources had qualifying changes, satisfying the `updates_on: all` condition.
+ 
+</details>
+ 
+---
+ 
+### 4b.7 Run the Production Job — First Run
+ 
+1. Navigate to **Orchestration → Jobs**
+2. Find **Prod Job** and click **Run now**
+3. Click into the running job to watch the live output
+4. As models execute, note which are marked **built** and which are **reused/skipped**
+5. After the run completes, compare the actual results to your prediction above
+ 
+> **What to look for in the logs:** Lines will show either a build status (time taken, rows affected) or a skip/reuse status explaining why the model was not rebuilt.
+ 
+---
+ 
+### 4b.8 Prediction Exercise — Run #2
+ 
+You are about to run the exact same job again, immediately, without introducing any new source data.
+ 
+Before clicking **Run**, write down your predictions for all three models again:
+ 
+| Model | Will it build or be reused? | Why? |
+|---|---|---|
+| `dim_customers` | | |
+| `stg_jaffle_shop__orders` | | |
+| `stg_jaffle_shop__stores` | | |
+ 
+<details>
+<summary>🔍 Expected outcome for Run #2</summary>
+ 
+**All three models → Reused**
+ 
+No new upstream data was introduced between Run #1 and Run #2. With no qualifying changes detected:
+- `dim_customers` still has not met its 3-hour threshold
+- `stg_jaffle_shop__orders` sees no new upstream data to trigger a rebuild
+- `stg_jaffle_shop__stores` sees no new upstream data across any of its sources
+ 
+SAO correctly reuses all prior results, and no warehouse compute is spent.
+ 
+</details>
+ 
+---
+ 
+### 4b.9 Run the Production Job — Second Run
+ 
+1. Click **Run now** on the same **Prod Job**
+2. Observe the results
+3. Compare what happened to both your prediction and to Run #1
+ 
+> **Reflect:** Think about what this means at scale. In a real project with hundreds of models running on a schedule, SAO can eliminate the majority of unnecessary builds — without any changes to how you write your models, just through freshness configuration.
+ 
+---
+ 
+### ✅ Step 4b Complete
+ 
+You've configured three different SAO behaviors — a time-based hold (`build_after`), a short-window gate, and a strict upstream requirement (`updates_on: all`) — and observed how each one changes what dbt decides to build vs. skip. This is one of the most direct levers you have for reducing warehouse costs in a dbt Platform environment powered by Fusion.
 
 ### 5.1 Understand the Concept Using the Lineage View
 
